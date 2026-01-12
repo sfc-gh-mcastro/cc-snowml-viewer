@@ -6,7 +6,7 @@ Snowflake connection to be used is named mcastro.
 
 ![image-20260112074955085](./assets/image-20260112074955085.png)
 
-**1st Interation**
+# **1st Interation**
 
 ![image-20260112130827245](./assets/image-20260112130827245.png)
 
