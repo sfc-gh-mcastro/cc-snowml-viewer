@@ -1,0 +1,15 @@
+definition_version: 2
+mixins:
+  - snowflake_default
+
+entities:
+  snowml_viewer:
+    type: application
+    identifier:
+      name: snowml_viewer
+    artifacts:
+      - sql/*
+      - backend/*
+    meta:
+      role: ACCOUNTADMIN
+      warehouse: COMPUTE_WH
