@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 from typing import Optional
 from functools import lru_cache
@@ -7,6 +8,8 @@ from snowflake.snowpark import Session
 from dotenv import load_dotenv
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
+
+logger = logging.getLogger(__name__)
 
 try:
     import tomllib
@@ -56,11 +59,13 @@ def get_connection_parameters() -> dict:
             # If no key path specified, try common locations
             if not private_key_path:
                 ssh_dir = Path.home() / ".ssh"
+                user = params.get('user', 'snowflake')
                 # Try to find a matching key file
                 possible_keys = [
-                    ssh_dir / f"{params.get('user', 'snowflake')}_rsa_key.p8",
-                    ssh_dir / "mcastro_aws1_uswest2_key.p8",
+                    ssh_dir / f"{user}_rsa_key.p8",
+                    ssh_dir / f"{user}_rsa_key.pem",
                     ssh_dir / "rsa_key.p8",
+                    ssh_dir / "snowflake_rsa_key.p8",
                 ]
                 for key_path in possible_keys:
                     if key_path.exists():
@@ -85,8 +90,9 @@ def get_connection_parameters() -> dict:
                         format=serialization.PrivateFormat.PKCS8,
                         encryption_algorithm=serialization.NoEncryption(),
                     )
-                except Exception:
-                    # If that fails, try as raw bytes
+                except Exception as e:
+                    # If that fails, try as raw bytes and log the error
+                    logger.warning(f"Failed to parse private key as PEM, using raw bytes: {e}")
                     params["private_key"] = key_data
 
                 if "private_key_file" in params:
