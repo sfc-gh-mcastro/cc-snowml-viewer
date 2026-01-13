@@ -3,6 +3,7 @@ import ReactFlow, {
   Background,
   Controls,
   MiniMap,
+  Panel,
   useNodesState,
   useEdgesState,
   type Node,
@@ -181,6 +182,27 @@ export default function NetworkGraph({ data, onNodeSelect }: NetworkGraphProps) 
     }));
   }, []);
 
+  // Get all compute pool IDs for collapse/expand all functionality
+  const computePoolIds = useMemo(
+    () =>
+      data.nodes
+        .filter((n) => n.type === 'computePool')
+        .map((n) => n.id),
+    [data.nodes]
+  );
+
+  const collapseAll = useCallback(() => {
+    const allCollapsed: Record<string, boolean> = {};
+    computePoolIds.forEach((id) => {
+      allCollapsed[id] = true;
+    });
+    setCollapsedPools(allCollapsed);
+  }, [computePoolIds]);
+
+  const expandAll = useCallback(() => {
+    setCollapsedPools({});
+  }, []);
+
   const { nodes: layoutedNodes, hiddenServiceIds } = useMemo(
     () => layoutNodesWithClusters(data, collapsedPools, togglePoolCollapse),
     [data, collapsedPools, togglePoolCollapse]
@@ -226,6 +248,10 @@ export default function NetworkGraph({ data, onNodeSelect }: NetworkGraphProps) 
     }
   };
 
+  // Check if any pools are collapsed for button state
+  const hasCollapsedPools = Object.values(collapsedPools).some(Boolean);
+  const allCollapsed = computePoolIds.length > 0 && computePoolIds.every((id) => collapsedPools[id]);
+
   return (
     <ReactFlow
       nodes={nodes}
@@ -242,6 +268,32 @@ export default function NetworkGraph({ data, onNodeSelect }: NetworkGraphProps) 
     >
       <Background color="#e5e7eb" gap={20} />
       <Controls position="top-right" />
+      <Panel position="top-left" className="flex gap-2">
+        <button
+          onClick={collapseAll}
+          disabled={allCollapsed}
+          className={`px-3 py-1.5 text-sm font-medium rounded-md border shadow-sm transition-colors
+            ${allCollapsed
+              ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+              : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+            }`}
+          title="Collapse all compute pool service groups"
+        >
+          Collapse All
+        </button>
+        <button
+          onClick={expandAll}
+          disabled={!hasCollapsedPools}
+          className={`px-3 py-1.5 text-sm font-medium rounded-md border shadow-sm transition-colors
+            ${!hasCollapsedPools
+              ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+              : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+            }`}
+          title="Expand all compute pool service groups"
+        >
+          Expand All
+        </button>
+      </Panel>
       <MiniMap
         nodeColor={miniMapNodeColor}
         nodeStrokeWidth={3}
