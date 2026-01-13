@@ -5,6 +5,10 @@ export interface ComputePoolData {
   maxNodes: number;
   instanceFamily: string;
   owner: string;
+  // Collapse metadata (added by layout)
+  __collapsed?: boolean;
+  __serviceCount?: number;
+  __onToggleCollapse?: () => void;
 }
 
 export interface ServiceData {

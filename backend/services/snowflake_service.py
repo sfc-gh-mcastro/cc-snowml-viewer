@@ -164,36 +164,107 @@ class SnowflakeService:
         return pools
 
     def get_services(self) -> list[Service]:
-        """Fetch all Snowpark Container Services."""
-        self.session.sql("SHOW SERVICES").collect()
-        df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
+        """Fetch all Snowpark Container Services.
 
+        This method first tries SHOW SERVICES to get a baseline list,
+        then enhances it by querying SHOW SERVICES IN COMPUTE POOL for each pool
+        to ensure we capture all services and their compute pool relationships.
+        """
+        services_map: dict[str, Service] = {}
+
+        # First, get services from SHOW SERVICES as baseline
+        try:
+            self.session.sql("SHOW SERVICES").collect()
+            df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
+
+            for _, row in df.iterrows():
+                service = self._parse_service_row(row)
+                service_key = f"{service.database_name}.{service.schema_name}.{service.name}"
+                services_map[service_key] = service
+        except Exception as e:
+            logger.warning(f"Failed to fetch services with SHOW SERVICES: {e}")
+
+        # Then, query each compute pool to ensure we capture all services
+        # and have accurate compute pool associations
+        try:
+            compute_pools = self.get_compute_pools()
+            for pool in compute_pools:
+                pool_services = self._get_services_in_compute_pool(pool.name)
+                for service in pool_services:
+                    service_key = f"{service.database_name}.{service.schema_name}.{service.name}"
+                    # Update or add the service with confirmed compute pool
+                    services_map[service_key] = service
+        except Exception as e:
+            logger.warning(f"Failed to fetch services by compute pool: {e}")
+
+        return list(services_map.values())
+
+    def _get_services_in_compute_pool(self, compute_pool_name: str) -> list[Service]:
+        """Fetch all services running in a specific compute pool.
+
+        Uses SHOW SERVICES IN COMPUTE POOL to get all services regardless of status
+        that are associated with the given compute pool.
+
+        Args:
+            compute_pool_name: The name of the compute pool to query
+
+        Returns:
+            List of Service objects running in the compute pool
+        """
         services = []
-        for _, row in df.iterrows():
-            # Get EAI list for this service
-            eai_list = self._get_service_eai(
-                row.get("database_name", ""),
-                row.get("schema_name", ""),
-                row.get("name", ""),
-            )
+        try:
+            # Quote the compute pool name to handle special characters
+            query = f'SHOW SERVICES IN COMPUTE POOL "{compute_pool_name}"'
+            logger.debug(f"Executing: {query}")
+            self.session.sql(query).collect()
+            df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
 
-            services.append(
-                Service(
-                    name=row.get("name", ""),
-                    database_name=row.get("database_name", ""),
-                    schema_name=row.get("schema_name", ""),
-                    owner=row.get("owner", ""),
-                    compute_pool=row.get("compute_pool", ""),
-                    dns_name=row.get("dns_name"),
-                    current_instances=int(row.get("current_instances", 0)),
-                    target_instances=int(row.get("target_instances", 0)),
-                    min_instances=int(row.get("min_instances", 0)),
-                    max_instances=int(row.get("max_instances", 0)),
-                    status=row.get("status", "UNKNOWN"),
-                    external_access_integrations=eai_list,
-                )
-            )
+            for _, row in df.iterrows():
+                service = self._parse_service_row(row, compute_pool_override=compute_pool_name)
+                services.append(service)
+
+            logger.debug(f"Found {len(services)} services in compute pool {compute_pool_name}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch services in compute pool {compute_pool_name}: {e}")
+
         return services
+
+    def _parse_service_row(self, row, compute_pool_override: str | None = None) -> Service:
+        """Parse a service row from SHOW SERVICES query result.
+
+        Args:
+            row: A pandas DataFrame row from SHOW SERVICES result
+            compute_pool_override: Optional compute pool name to use instead of row value
+
+        Returns:
+            A Service object populated from the row data
+        """
+        # Get EAI list for this service
+        eai_list = self._get_service_eai(
+            row.get("database_name", ""),
+            row.get("schema_name", ""),
+            row.get("name", ""),
+        )
+
+        # Use override if provided, otherwise get from row
+        compute_pool = (
+            compute_pool_override if compute_pool_override else row.get("compute_pool", "")
+        )
+
+        return Service(
+            name=row.get("name", "") or "",
+            database_name=row.get("database_name", "") or "",
+            schema_name=row.get("schema_name", "") or "",
+            owner=row.get("owner", "") or "",
+            compute_pool=compute_pool or "",
+            dns_name=row.get("dns_name"),
+            current_instances=int(row.get("current_instances") or 0),
+            target_instances=int(row.get("target_instances") or 0),
+            min_instances=int(row.get("min_instances") or 0),
+            max_instances=int(row.get("max_instances") or 0),
+            status=row.get("status", "UNKNOWN") or "UNKNOWN",
+            external_access_integrations=eai_list,
+        )
 
     def _get_service_eai(self, database: str, schema: str, service_name: str) -> list[str]:
         """Get external access integrations for a service from its spec."""
@@ -259,7 +330,13 @@ class SnowflakeService:
         return integrations
 
     def get_graph_data(self) -> GraphData:
-        """Build complete graph data structure for visualization."""
+        """Build complete graph data structure for visualization.
+
+        This method fetches all ML infrastructure components and builds
+        a graph structure representing their relationships. Services are
+        connected to compute pools via 'runs on' edges, and to external
+        access integrations via 'uses' edges.
+        """
         compute_pools = self.get_compute_pools()
         services = self.get_services()
         notebooks = self.get_notebooks()
@@ -267,6 +344,10 @@ class SnowflakeService:
 
         nodes: list[GraphNode] = []
         edges: list[GraphEdge] = []
+
+        # Create lookup sets for validation
+        compute_pool_names = {cp.name for cp in compute_pools}
+        eai_names = {eai.name for eai in eais}
 
         # Add compute pool nodes
         for cp in compute_pools:
@@ -319,27 +400,39 @@ class SnowflakeService:
                 )
             )
 
-            # Edge: service -> compute pool
+            # Edge: service -> compute pool (validate pool exists)
             if svc.compute_pool:
-                edges.append(
-                    GraphEdge(
-                        id=f"e-svc-cp-{svc.name}",
-                        source=f"svc-{svc.database_name}.{svc.schema_name}.{svc.name}",
-                        target=f"cp-{svc.compute_pool}",
-                        label="runs on",
+                if svc.compute_pool in compute_pool_names:
+                    edges.append(
+                        GraphEdge(
+                            id=f"e-svc-cp-{svc.name}",
+                            source=f"svc-{svc.database_name}.{svc.schema_name}.{svc.name}",
+                            target=f"cp-{svc.compute_pool}",
+                            label="runs on",
+                        )
                     )
-                )
+                else:
+                    logger.warning(
+                        f"Service {svc.name} references compute pool {svc.compute_pool} "
+                        "which was not found in available compute pools"
+                    )
 
-            # Edges: service -> EAI
+            # Edges: service -> EAI (validate EAI exists)
             for eai_name in svc.external_access_integrations:
-                edges.append(
-                    GraphEdge(
-                        id=f"e-svc-eai-{svc.name}-{eai_name}",
-                        source=f"svc-{svc.database_name}.{svc.schema_name}.{svc.name}",
-                        target=f"eai-{eai_name}",
-                        label="uses",
+                if eai_name in eai_names:
+                    edges.append(
+                        GraphEdge(
+                            id=f"e-svc-eai-{svc.name}-{eai_name}",
+                            source=f"svc-{svc.database_name}.{svc.schema_name}.{svc.name}",
+                            target=f"eai-{eai_name}",
+                            label="uses",
+                        )
                     )
-                )
+                else:
+                    logger.warning(
+                        f"Service {svc.name} references EAI {eai_name} "
+                        "which was not found in available integrations"
+                    )
 
         # Add notebook nodes
         # Note: Linking notebooks to services requires additional logic based on
