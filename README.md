@@ -1,4 +1,4 @@
-**Snowflake ML Viewer**
+# **Snowflake ML Viewer**
 
 **Idea**: As a user I would like to see what computer pools I have per role, what services are connected to which computer pool and running which external service integration, and which notebook are connected to which service and owner by which user. 
 
@@ -44,10 +44,6 @@ When complete:
 
 
 
-**TODO**:
-
-
-
 ## 3rd Interaction - Better Visualization
 
 ```bash
@@ -65,3 +61,6 @@ When complete:
 
 ```
 
+
+
+![image-20260114095843619](./assets/image-20260114095843619.png)
