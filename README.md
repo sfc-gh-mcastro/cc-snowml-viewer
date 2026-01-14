@@ -40,6 +40,28 @@ When complete:
 
 
 
+![image-20260113152945560](./assets/image-20260113152945560.png)
+
 
 
 **TODO**:
+
+
+
+## 3rd Interaction - Better Visualization
+
+```bash
+Tasks: "Implement the following tasks: 
+- Add debug mode on the backend to show what queries towards snowflake is been generated.
+- Have a buttom that collapse all and expand all for better visibility in the frontend.
+- In the frontend add connection between service and external access integration. The same way you did between computer pool and service.  
+
+When complete:
+- Make sure connections are from computer pool -> service -> external access.
+- Make sure error handling is done properly.
+- Include a summary of which plan you used and solution implemented to create the feature in a markdown file named FEATURE_<NAME>.md
+- Output: <promise>COMPLETE</promise>" --completion-promise "COMPLETE" --max-iterations 20
+
+
+```
+

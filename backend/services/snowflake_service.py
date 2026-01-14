@@ -11,6 +11,19 @@ from cryptography.hazmat.backends import default_backend
 
 logger = logging.getLogger(__name__)
 
+# Debug mode for query logging - set via environment variable
+DEBUG_QUERIES = os.getenv("DEBUG_SNOWFLAKE_QUERIES", "false").lower() in ("true", "1", "yes")
+
+if DEBUG_QUERIES:
+    logger.setLevel(logging.DEBUG)
+    # Ensure we have a handler that shows debug messages
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
 try:
     import tomllib
 except ImportError:
@@ -141,9 +154,24 @@ class SnowflakeService:
             self._session.close()
             self._session = None
 
+    def _execute_sql(self, query: str):
+        """Execute a SQL query with optional debug logging.
+
+        When DEBUG_SNOWFLAKE_QUERIES is enabled, logs the query before execution.
+
+        Args:
+            query: The SQL query to execute
+
+        Returns:
+            The result of session.sql(query).collect()
+        """
+        if DEBUG_QUERIES:
+            logger.debug(f"Executing Snowflake query: {query}")
+        return self.session.sql(query).collect()
+
     def get_compute_pools(self) -> list[ComputePool]:
         """Fetch all compute pools."""
-        self.session.sql("SHOW COMPUTE POOLS").collect()
+        self._execute_sql("SHOW COMPUTE POOLS")
         df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
 
         pools = []
@@ -174,7 +202,7 @@ class SnowflakeService:
 
         # First, get services from SHOW SERVICES as baseline
         try:
-            self.session.sql("SHOW SERVICES").collect()
+            self._execute_sql("SHOW SERVICES")
             df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
 
             for _, row in df.iterrows():
@@ -215,8 +243,7 @@ class SnowflakeService:
         try:
             # Quote the compute pool name to handle special characters
             query = f'SHOW SERVICES IN COMPUTE POOL "{compute_pool_name}"'
-            logger.debug(f"Executing: {query}")
-            self.session.sql(query).collect()
+            self._execute_sql(query)
             df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
 
             for _, row in df.iterrows():
@@ -267,31 +294,89 @@ class SnowflakeService:
         )
 
     def _get_service_eai(self, database: str, schema: str, service_name: str) -> list[str]:
-        """Get external access integrations for a service from its spec."""
+        """Get external access integrations for a service from its spec.
+
+        Uses DESCRIBE SERVICE to get the service specification and extracts
+        the external_access_integrations field.
+        """
+        import re
+
         try:
-            fqn = f"{database}.{schema}.{service_name}"
-            self.session.sql(f"DESCRIBE SERVICE {fqn}").collect()
+            fqn = f'"{database}"."{schema}"."{service_name}"'
+            self._execute_sql(f"DESCRIBE SERVICE {fqn}")
             df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
 
-            # Look for external_access_integrations in the spec
-            for _, row in df.iterrows():
-                if "spec" in str(row).lower():
-                    spec = str(row.get("spec", ""))
-                    # Parse EXTERNAL_ACCESS_INTEGRATIONS from spec YAML
-                    if "EXTERNAL_ACCESS_INTEGRATIONS" in spec.upper():
-                        # Simple extraction - in production, use proper YAML parsing
-                        import re
+            if DEBUG_QUERIES:
+                logger.debug(f"DESCRIBE SERVICE {fqn} returned columns: {list(df.columns)}")
 
-                        matches = re.findall(r"EXTERNAL_ACCESS_INTEGRATIONS:\s*\[([^\]]+)\]", spec, re.IGNORECASE)
-                        if matches:
-                            return [eai.strip().strip("'\"") for eai in matches[0].split(",")]
-        except Exception:
-            pass
+            # Check all columns and rows for EAI information
+            eai_list = []
+
+            # Method 1: Look for external_access_integrations column directly
+            for col in df.columns:
+                if "external_access" in col.lower():
+                    for _, row in df.iterrows():
+                        val = row.get(col)
+                        if val and str(val).strip() and str(val).lower() != "none":
+                            # Parse as list if it looks like one
+                            val_str = str(val).strip()
+                            if val_str.startswith("[") and val_str.endswith("]"):
+                                # Parse JSON-like list
+                                inner = val_str[1:-1]
+                                eai_list.extend([e.strip().strip("'\"") for e in inner.split(",") if e.strip()])
+                            else:
+                                eai_list.append(val_str)
+
+            if eai_list:
+                if DEBUG_QUERIES:
+                    logger.debug(f"Found EAIs via column search: {eai_list}")
+                return eai_list
+
+            # Method 2: Search in spec column for EXTERNAL_ACCESS_INTEGRATIONS
+            for col in df.columns:
+                if "spec" in col.lower():
+                    for _, row in df.iterrows():
+                        spec = str(row.get(col, ""))
+                        if "EXTERNAL_ACCESS_INTEGRATIONS" in spec.upper():
+                            # Try multiple regex patterns
+                            patterns = [
+                                r"EXTERNAL_ACCESS_INTEGRATIONS\s*:\s*\[([^\]]+)\]",
+                                r"external_access_integrations\s*=\s*\[([^\]]+)\]",
+                                r'"external_access_integrations"\s*:\s*\[([^\]]+)\]',
+                            ]
+                            for pattern in patterns:
+                                matches = re.findall(pattern, spec, re.IGNORECASE)
+                                if matches:
+                                    eai_list = [eai.strip().strip("'\"") for eai in matches[0].split(",")]
+                                    if DEBUG_QUERIES:
+                                        logger.debug(f"Found EAIs via spec parsing: {eai_list}")
+                                    return eai_list
+
+            # Method 3: Look through all string values for EAI patterns
+            for _, row in df.iterrows():
+                for col in df.columns:
+                    val = str(row.get(col, ""))
+                    if "EXTERNAL_ACCESS_INTEGRATIONS" in val.upper():
+                        patterns = [
+                            r"EXTERNAL_ACCESS_INTEGRATIONS\s*:\s*\[([^\]]+)\]",
+                            r"external_access_integrations\s*=\s*\[([^\]]+)\]",
+                        ]
+                        for pattern in patterns:
+                            matches = re.findall(pattern, val, re.IGNORECASE)
+                            if matches:
+                                eai_list = [eai.strip().strip("'\"") for eai in matches[0].split(",")]
+                                if DEBUG_QUERIES:
+                                    logger.debug(f"Found EAIs via full scan: {eai_list}")
+                                return eai_list
+
+        except Exception as e:
+            if DEBUG_QUERIES:
+                logger.debug(f"Error getting EAIs for {database}.{schema}.{service_name}: {e}")
         return []
 
     def get_notebooks(self) -> list[Notebook]:
         """Fetch all notebooks."""
-        self.session.sql("SHOW NOTEBOOKS").collect()
+        self._execute_sql("SHOW NOTEBOOKS")
         df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
 
         notebooks = []
@@ -312,7 +397,7 @@ class SnowflakeService:
 
     def get_external_access_integrations(self) -> list[ExternalAccessIntegration]:
         """Fetch all external access integrations."""
-        self.session.sql("SHOW EXTERNAL ACCESS INTEGRATIONS").collect()
+        self._execute_sql("SHOW EXTERNAL ACCESS INTEGRATIONS")
         df = self.session.sql("SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))").to_pandas()
 
         integrations = []
